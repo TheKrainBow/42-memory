@@ -1,0 +1,10 @@
+.env
+.env.*
+node_modules/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+*.log
+Maquettes
+api-contract.json

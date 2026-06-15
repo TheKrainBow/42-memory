@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+piscine-games.sqlite
+piscine-games.sqlite-wal
+piscine-games.sqlite-shm
+.git
+.gitignore
+.env
