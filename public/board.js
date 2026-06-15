@@ -224,7 +224,7 @@ function syncGame(game) {
 }
 
 async function fetchCurrentGame() {
-  const response = await fetch("/api/game/current");
+  const response = await fetch(`/api/game/current?ts=${Date.now()}`, { cache: "no-store" });
   if (!response.ok) {
     return null;
   }
@@ -250,9 +250,14 @@ function startLiveStream() {
       syncGame(payload.game);
     }
   };
-  liveSource.onerror = () => {
-    liveSource?.close();
-  };
+liveSource.onerror = () => {
+  liveSource?.close();
+  setTimeout(() => {
+    if (!liveSource || liveSource.readyState === EventSource.CLOSED) {
+      startLiveStream();
+    }
+  }, 1500);
+};
 }
 
 function tick() {
@@ -281,6 +286,6 @@ if (board && stage) {
   scheduleLayout();
   await refresh();
   startLiveStream();
-  setInterval(refresh, 15000);
+  setInterval(refresh, 1000);
   setInterval(tick, 1000);
 }

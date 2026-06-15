@@ -597,6 +597,11 @@ h1 {
   opacity: 0.9;
 }
 
+.board-live.blurred .floating-word.found {
+  filter: none;
+  opacity: 1;
+}
+
 .board-live.finished .floating-word {
   filter: none;
   opacity: 1;

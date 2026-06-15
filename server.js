@@ -218,7 +218,7 @@ function getGameSnapshot(gameId) {
     FROM guesses
     WHERE game_id = ?
     ORDER BY id DESC
-    LIMIT 20
+    LIMIT 250
   `).all(gameId);
 
   return {
@@ -302,6 +302,7 @@ function registerLiveStream(req, res) {
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
+  res.flushHeaders?.();
 
   const active = ensureCurrentGame();
   res.write(`data: ${JSON.stringify({ game: active ? getGameSnapshot(active.id) : null })}\n\n`);
@@ -325,11 +326,11 @@ function renderFactionMark(size = "large") {
   `;
 }
 
-function renderStatusCard(label, value, modifier = "") {
+function renderStatusCard(label, value, modifier = "", extraAttrs = "", valueId = "") {
   return `
-    <article class="status-card ${modifier}">
+    <article class="status-card ${modifier}" ${extraAttrs}>
       <span class="status-label">${label}</span>
-      <strong class="status-value">${value}</strong>
+      <strong class="status-value" ${valueId ? `id="${valueId}"` : ""}>${value}</strong>
     </article>
   `;
 }
@@ -478,9 +479,9 @@ function renderTvPage() {
       <main class="tv-stage ${isBlurred ? "is-blurred" : ""} ${isFinished ? "is-finished" : ""}" data-page="host" data-game-id="${game.id}" data-seed="${game.seed}" data-status="${game.status}" data-reveal-at="${escapeHtml(game.revealAt)}" data-submit-until="${escapeHtml(game.submitUntil)}" data-word-count="${game.word_count}" data-guessed-count="${game.guessed_count}" data-try-count="${game.try_count}">
         <header class="tv-topbar">
           <div class="tv-stats">
-            ${renderStatusCard("Temps", phase.remainingMs ? formatClock(phase.remainingMs) : "0:00", "stat-card")}
-            ${renderStatusCard("Trouvés", `${game.guessed_count} / ${game.word_count}`, "stat-card")}
-            ${renderStatusCard("Essais restants", `${MAX_TRIES - game.try_count}`, "stat-card")}
+            ${renderStatusCard("Temps", phase.remainingMs ? formatClock(phase.remainingMs) : "0:00", "stat-card", "", "tvTimer")}
+            ${renderStatusCard("Trouvés", `${game.guessed_count} / ${game.word_count}`, "stat-card", "", "tvGuessed")}
+            ${renderStatusCard("Essais restants", `${MAX_TRIES - game.try_count}`, "stat-card", "", "tvRemaining")}
           </div>
           <div class="faction-panel">
             ${renderFactionMark("small")}
@@ -488,6 +489,7 @@ function renderTvPage() {
               <span class="panel-kicker">${THEME_CONFIG.factionTag}</span>
               <strong>${THEME_CONFIG.factionName}</strong>
             </div>
+            <div class="status-pill" id="tvPhaseLabel">${phase.label}</div>
           </div>
         </header>
 
@@ -509,8 +511,16 @@ function renderTvPage() {
 }
 
 function renderTabletPage() {
-  const game = withDistinctCounts(ensureCurrentGame());
+  const game = getGameSnapshot(ensureCurrentGame()?.id);
   const phase = getGamePhase(game);
+  const guessRows = (game?.guesses ?? [])
+    .map((guess) => `
+      <div class="guess-item">
+        <strong>${escapeHtml(guess.raw_word)}</strong>
+        <span>${guess.is_correct ? "Trouvé" : "Raté"}</span>
+      </div>
+    `)
+    .join("") || `<div class="guess-item"><span>Aucune réponse pour le moment.</span><span></span></div>`;
   return pageShell({
     title: `Mémoire - Tablette - ${THEME_CONFIG.factionName}`,
     bodyClass: THEME_CONFIG.bodyClass,
@@ -530,9 +540,9 @@ function renderTabletPage() {
         </header>
 
         <section class="tablet-stats">
-          ${renderStatusCard("Temps", phase.remainingMs ? formatClock(phase.remainingMs) : "0:00", "stat-card")}
-          ${renderStatusCard("Trouvés", `${game?.guessed_count ?? 0} / ${WORD_COUNT}`, "stat-card")}
-          ${renderStatusCard("Essais restants", `${MAX_TRIES - (game?.try_count ?? 0)}`, "stat-card")}
+          ${renderStatusCard("Temps", phase.remainingMs ? formatClock(phase.remainingMs) : "0:00", "stat-card", "", "submitTimer")}
+          ${renderStatusCard("Trouvés", `${game?.guessed_count ?? 0} / ${WORD_COUNT}`, "stat-card", "", "foundCount")}
+          ${renderStatusCard("Essais restants", `${MAX_TRIES - (game?.try_count ?? 0)}`, "stat-card", "", "tryCount")}
         </section>
 
         <section class="tablet-layout">
@@ -540,7 +550,7 @@ function renderTabletPage() {
             <div class="panel-kicker">Saisir les réponses</div>
             <div class="submit-form">
               <input id="guessInput" name="guess" autocomplete="off" placeholder="Tapez un mot puis validez" />
-              <button type="submit">Valider</button>
+              <button type="submit" ${phase.finished || phase.label !== "Partie" || (game?.try_count ?? 0) >= MAX_TRIES ? "disabled" : ""}>Valider</button>
             </div>
             <div class="submit-helper">Les doublons seront marqués comme déjà trouvé ou déjà tenté sans consommer d'essai.</div>
             <div class="message" id="message"></div>
@@ -548,7 +558,7 @@ function renderTabletPage() {
 
           <section class="submit-card">
             <div class="panel-kicker">Dernières réponses</div>
-            <div id="guessList" class="guess-list"></div>
+            <div id="guessList" class="guess-list">${guessRows}</div>
           </section>
         </section>
       </main>
@@ -630,6 +640,12 @@ function handleGuess(req, res) {
   `).get(hydratedGame.id, normalizedWord);
 
   if (previousGuess) {
+    db.prepare(`
+      INSERT INTO guesses (game_id, raw_word, normalized_word, is_correct, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(hydratedGame.id, rawWord, normalizedWord, previousGuess.is_correct ? 1 : 0, nowIso());
+
+    completeGameIfNeeded(hydratedGame.id);
     const payload = {
       ok: true,
       correct: false,
@@ -642,6 +658,7 @@ function handleGuess(req, res) {
         isCorrect: Boolean(previousGuess.is_correct),
       },
     };
+    broadcastGame(hydratedGame.id);
     return res.json(payload);
   }
 

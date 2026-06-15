@@ -20,6 +20,15 @@ function formatDuration(ms) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function getPhase(game) {
   const now = Date.now();
   const revealMs = new Date(game.revealAt).getTime() - now;
@@ -31,7 +40,7 @@ function getPhase(game) {
 }
 
 async function fetchCurrentGame() {
-  const response = await fetch("/api/game/current");
+  const response = await fetch(`/api/game/current?ts=${Date.now()}`, { cache: "no-store" });
   if (!response.ok) {
     return null;
   }
@@ -43,11 +52,35 @@ function renderGuessList(game) {
   guessList.innerHTML = guesses
     .map((guess) => `
       <div class="guess-item">
-        <strong>${guess.raw_word}</strong>
+        <strong>${escapeHtml(guess.raw_word)}</strong>
         <span>${guess.is_correct ? "Trouvé" : "Raté"}</span>
       </div>
     `)
     .join("") || `<div class="guess-item"><span>Aucune réponse pour le moment.</span><span></span></div>`;
+}
+
+function prependGuessToList(guess) {
+  if (!guessList || !guess) {
+    return;
+  }
+
+  const item = document.createElement("div");
+  item.className = "guess-item";
+  item.innerHTML = `
+    <strong>${escapeHtml(guess.rawWord ?? guess.raw_word ?? "")}</strong>
+    <span>${guess.isCorrect ?? guess.is_correct ? "Trouvé" : "Raté"}</span>
+  `;
+
+  const emptyState = guessList.querySelector(".guess-item");
+  if (emptyState && emptyState.textContent?.includes("Aucune réponse")) {
+    guessList.innerHTML = "";
+  }
+
+  guessList.prepend(item);
+
+  while (guessList.children.length > 20) {
+    guessList.removeChild(guessList.lastElementChild);
+  }
 }
 
 function updateGame(game) {
@@ -116,7 +149,14 @@ guessForm.addEventListener("submit", async (event) => {
   message.textContent = `${word}: ${correct}`;
   message.className = payload.correct ? "message ok" : "message";
   guessInput.value = "";
-  await refresh();
+  if (payload.guess) {
+    prependGuessToList(payload.guess);
+  }
+  if (payload.game) {
+    updateGame(payload.game);
+  } else {
+    await refresh();
+  }
 });
 
 function startLiveStream() {
@@ -130,14 +170,19 @@ function startLiveStream() {
       updateGame(payload.game);
     }
   };
-  liveSource.onerror = () => {
-    liveSource?.close();
-  };
+liveSource.onerror = () => {
+  liveSource?.close();
+  setTimeout(() => {
+    if (!liveSource || liveSource.readyState === EventSource.CLOSED) {
+      startLiveStream();
+    }
+  }, 1500);
+};
 }
 
 await refresh();
 startLiveStream();
-setInterval(refresh, 15000);
+setInterval(refresh, 1000);
 setInterval(() => {
   if (currentGame) {
     updateGame(currentGame);
