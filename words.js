@@ -74,6 +74,15 @@ export function hashSeed(...parts) {
   return hash >>> 0;
 }
 
+export function wordPoolSize() {
+  return new Set(
+    WORDS
+      .map((word) => word.trim())
+      .filter(Boolean)
+      .filter((word) => /^[A-Za-z0-9À-ÿ]+$/.test(word))
+  ).size;
+}
+
 export function sampleWords(count, seed = Date.now()) {
   const unique = [...new Set(
     WORDS

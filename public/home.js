@@ -1,125 +1,61 @@
-const form = document.getElementById("startGameForm");
-const seedInput = document.getElementById("seedInput");
-const randomizeSeedButton = document.getElementById("randomizeSeedButton");
-const currentGameCard = document.querySelector("[data-current-game-id]");
-const currentGameStatus = document.querySelector(".content-card .badge");
-const currentGameStatGrid = document.querySelector(".stat-grid");
-const historyList = document.querySelectorAll(".history-list");
+import { api, connectSocket, escapeHtml, modeName } from "/assets/common.js";
 
-function randomSeed() {
-  return Math.floor(Math.random() * 2147483646) + 1;
-}
+const createForm = document.getElementById("createLobbyForm");
+const createMessage = document.getElementById("createMessage");
+const lobbyList = document.getElementById("lobbyList");
+const lobbyCountBadge = document.getElementById("lobbyCountBadge");
 
-if (seedInput && !seedInput.value) {
-  seedInput.value = String(randomSeed());
-}
+document.getElementById("logoutButton")?.addEventListener("click", async () => {
+  await fetch("/auth/logout", { method: "POST" });
+  window.location.href = "/login";
+});
 
-if (randomizeSeedButton) {
-  randomizeSeedButton.addEventListener("click", () => {
-    if (seedInput) {
-      seedInput.value = String(randomSeed());
-      seedInput.focus();
-      seedInput.select();
-    }
-  });
-}
-
-if (form) {
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const submitButton = form.querySelector("[data-start-game]");
-    const seed = Number.parseInt(seedInput?.value || "", 10);
-    const payload = Number.isFinite(seed) && seed > 0 ? { seed } : {};
-
-    submitButton.setAttribute("aria-busy", "true");
-    submitButton.disabled = true;
-    try {
-      const response = await fetch("/api/game/new", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        throw new Error("Unable to create a new game");
-      }
-      window.location.href = "/tv";
-    } finally {
-      submitButton.removeAttribute("aria-busy");
-      submitButton.disabled = false;
-    }
-  });
-}
-
-function formatGameStatus(status) {
-  return status === "active" ? "en cours" : "terminée";
-}
-
-async function fetchJson(url) {
-  const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}ts=${Date.now()}`, { cache: "no-store" });
-  if (!response.ok) {
-    return null;
-  }
-  return response.json();
-}
-
-function renderCurrentGame(game) {
-  if (!currentGameCard || !currentGameStatus || !currentGameStatGrid) {
+// A lobby only needs a name: the host tunes the rules from inside the lobby.
+createForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await api("/api/lobby", { name: document.getElementById("lobbyName").value });
+  if (result.lobbyId) {
+    window.location.href = `/lobby/${result.lobbyId}`;
     return;
   }
-  currentGameStatus.textContent = formatGameStatus(game?.status || "finished");
-  currentGameStatGrid.innerHTML = game
-    ? `
-      <article class="status-card">
-        <span class="status-label">Seed</span>
-        <strong class="status-value">${game.seed}</strong>
-      </article>
-      <article class="status-card">
-        <span class="status-label">Trouvés</span>
-        <strong class="status-value">${game.guessed_count}/${game.word_count}</strong>
-      </article>
-      <article class="status-card">
-        <span class="status-label">Essais</span>
-        <strong class="status-value">${game.try_count}/250</strong>
-      </article>
-      <article class="status-card">
-        <span class="status-label">Résolution</span>
-        <strong class="status-value">${game.word_count ? Math.round((game.guessed_count / game.word_count) * 100) : 0}%</strong>
-      </article>
-    `
-    : `<div class="empty-copy">Aucune partie en cours. Lancez-en une depuis le panneau du dessus.</div>`;
-}
+  createMessage.textContent = result.error || "Création impossible.";
+  createMessage.className = "message error";
+});
 
-function renderHistory(games) {
-  for (const list of historyList) {
-    list.innerHTML = games
-      .map((game) => `
-        <article class="history-row">
-          <div class="history-main">
-            <strong>Game #${game.id}</strong>
-            <span>Seed ${game.seed}</span>
-          </div>
-          <div class="history-stats">
-            <span>${game.guessed_count}/${game.word_count} trouvés</span>
-            <span>${game.try_count}/250 essais</span>
-            <span>${game.guessedPercent}%</span>
-          </div>
-          <span class="history-status ${game.status}">${formatGameStatus(game.status)}</span>
-        </article>
-      `)
-      .join("") || `<div class="empty-copy">Aucune partie pour le moment.</div>`;
+function renderLobbies(lobbies) {
+  lobbyCountBadge.textContent = `${lobbies.length} salon${lobbies.length > 1 ? "s" : ""}`;
+  lobbyList.innerHTML = lobbies
+    .map((lobby) => `
+      <article class="history-row lobby-row" data-lobby-id="${lobby.id}">
+        <div class="history-main">
+          <strong>${escapeHtml(lobby.name)}</strong>
+          <span>Hôte : ${escapeHtml(lobby.hostLogin)}</span>
+        </div>
+        <div class="history-stats">
+          <span>${modeName(lobby.mode)}</span>
+          <span>${lobby.memberCount} joueur${lobby.memberCount > 1 ? "s" : ""} · ${lobby.wordCount} mots</span>
+        </div>
+        <span class="history-status ${lobby.playing ? "active" : ""}">${lobby.playing ? "En jeu" : "En attente"}</span>
+        <button type="button" class="secondary join-button">Rejoindre</button>
+      </article>
+    `)
+    .join("") || `<div class="empty-copy">Aucun salon ouvert pour le moment.</div>`;
+
+  for (const row of lobbyList.querySelectorAll(".lobby-row")) {
+    row.querySelector(".join-button").addEventListener("click", async () => {
+      const lobbyId = row.dataset.lobbyId;
+      const result = await api(`/api/lobby/${lobbyId}/join`);
+      if (result.ok || result.lobbyId) {
+        window.location.href = `/lobby/${result.lobbyId ?? lobbyId}`;
+      }
+    });
   }
 }
 
-async function refreshHome() {
-  const [currentPayload, historyPayload] = await Promise.all([
-    fetchJson("/api/game/current"),
-    fetchJson("/api/game/history?limit=10"),
-  ]);
-  renderCurrentGame(currentPayload?.game || null);
-  renderHistory(historyPayload?.games || []);
-}
-
-if (currentGameCard) {
-  refreshHome();
-  setInterval(refreshHome, 1000);
-}
+connectSocket({
+  onMessage: (payload) => {
+    if (payload.type === "lobbies") {
+      renderLobbies(payload.lobbies ?? []);
+    }
+  },
+});
