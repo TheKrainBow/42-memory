@@ -105,6 +105,10 @@ function normalizeSettings(input) {
     ? String(raw.allowedCoalitions).toUpperCase()
     : "BOTH";
   const difficulty = raw.difficulty === "hard" ? "hard" : "easy";
+  const bombMinSeconds = clampInt(raw.bombMinSeconds, 3, 300, 15);
+  // Max can never end up below min: a lobby host dragging min past the
+  // current max just pulls max up with it instead of erroring out.
+  const bombMaxSeconds = Math.max(bombMinSeconds, clampInt(raw.bombMaxSeconds, 3, 300, 30));
   return {
     mode,
     wordCount: clampInt(raw.wordCount, 10, wordPoolSize(), 200),
@@ -114,6 +118,8 @@ function normalizeSettings(input) {
     mistakeLimit,
     allowedCoalitions,
     difficulty,
+    bombMinSeconds,
+    bombMaxSeconds,
   };
 }
 
@@ -217,12 +223,12 @@ function getLatestGameForLobby(lobbyId) {
 // lives only in the DB/server memory and is never sent to clients.
 // ---------------------------------------------------------------------------
 
-const BOMB_FUSE_MIN_MS = 15000;
-const BOMB_FUSE_MAX_MS = 30000;
 const BOMB_MIN_TURN_MS = 2000;
 
-function randomBombFuseMs() {
-  return crypto.randomInt(BOMB_FUSE_MIN_MS, BOMB_FUSE_MAX_MS + 1);
+function randomBombFuseMs(settings) {
+  const minMs = settings.bombMinSeconds * 1000;
+  const maxMs = settings.bombMaxSeconds * 1000;
+  return crypto.randomInt(minMs, maxMs + 1);
 }
 
 // Walks the fixed circle order starting just after `fromUserId`, returning
@@ -268,7 +274,7 @@ function startLobbyGame(lobby, seedOverride) {
     bombOrder = eligible.map((member) => member.id);
     bombAlive = [...bombOrder];
     bombHolder = bombOrder[Math.floor(Math.random() * bombOrder.length)];
-    bombDeadline = new Date(revealAt.getTime() + randomBombFuseMs());
+    bombDeadline = new Date(revealAt.getTime() + randomBombFuseMs(settings));
   }
 
   const result = db.prepare(`
@@ -516,7 +522,7 @@ function tickBombGame(game) {
   }
 
   const nextHolder = nextAlivePlayer(order, alive, game.bomb_holder_id);
-  const deadline = new Date(now + randomBombFuseMs());
+  const deadline = new Date(now + randomBombFuseMs(parseSettings(game.settings_json)));
   db.prepare(`
     UPDATE games
     SET bomb_alive_json = ?, bomb_eliminated_json = ?, bomb_holder_id = ?, bomb_deadline_at = ?
@@ -1399,6 +1405,14 @@ function renderHostPage(user, lobby) {
                         <option value="easy">Facile</option>
                         <option value="hard">Difficile</option>
                       </select>
+                    </label>
+                    <label class="seed-field" id="bombMinSecondsField">
+                      <span>Bombe min (s)</span>
+                      <input id="setBombMinSeconds" type="number" min="3" max="300" />
+                    </label>
+                    <label class="seed-field" id="bombMaxSecondsField">
+                      <span>Bombe max (s)</span>
+                      <input id="setBombMaxSeconds" type="number" min="3" max="300" />
                     </label>
                   </div>
                   <div class="launch-actions">

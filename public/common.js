@@ -125,13 +125,18 @@ export function renderSettingsSummary(el, settings) {
   if (!el) {
     return;
   }
+  const isBomb = settings.mode === "bomb";
   el.innerHTML = `
     <div class="settings-row"><span>Mode</span><strong>${modeName(settings.mode)}</strong></div>
     <div class="settings-row"><span>Difficulté</span><strong>${escapeHtml(difficultyName(settings.difficulty))}</strong></div>
     <div class="settings-row"><span>Mots affichés</span><strong>${settings.wordCount}</strong></div>
     <div class="settings-row"><span>Mémorisation</span><strong>${settings.revealSeconds}s</strong></div>
-    <div class="settings-row"><span>Écriture</span><strong>${formatDuration(settings.writeSeconds * 1000)}</strong></div>
-    <div class="settings-row"><span>Erreurs</span><strong>${escapeHtml(mistakeRuleText(settings))}</strong></div>
+    ${isBomb
+      ? `<div class="settings-row"><span>Bombe</span><strong>${settings.bombMinSeconds}-${settings.bombMaxSeconds}s</strong></div>`
+      : `
+        <div class="settings-row"><span>Écriture</span><strong>${formatDuration(settings.writeSeconds * 1000)}</strong></div>
+        <div class="settings-row"><span>Erreurs</span><strong>${escapeHtml(mistakeRuleText(settings))}</strong></div>
+      `}
     <div class="settings-row"><span>Coalitions</span><strong>${escapeHtml(allowedCoalitionsText(settings))}</strong></div>
   `;
 }

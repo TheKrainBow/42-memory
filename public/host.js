@@ -58,6 +58,10 @@ const modeSelect = document.getElementById("setMode");
 const writeSecondsField = document.getElementById("writeSecondsField");
 const mistakeModeField = document.getElementById("mistakeModeField");
 const mistakePolicyField = document.getElementById("mistakePolicyField");
+const bombMinSecondsField = document.getElementById("bombMinSecondsField");
+const bombMaxSecondsField = document.getElementById("bombMaxSecondsField");
+const bombMinSecondsInput = document.getElementById("setBombMinSeconds");
+const bombMaxSecondsInput = document.getElementById("setBombMaxSeconds");
 
 let state = null;
 let cachedLayout = null;
@@ -118,14 +122,16 @@ closeLobbyButton.addEventListener("click", async () => {
 // Settings form (editable between games only)
 // ---------------------------------------------------------------------------
 
-// Bomb mode has its own fixed elimination fuse (15-30s) and no write-phase
-// deadline or mistake budget, so those fields are meaningless — hide them.
+// Bomb mode has its own configurable fuse range and no write-phase deadline
+// or mistake budget, so those fields swap for these instead.
 function syncSettingsVisibility() {
   const isBomb = modeSelect.value === "bomb";
   writeSecondsField.hidden = isBomb;
   mistakeModeField.hidden = isBomb;
   mistakePolicyField.hidden = isBomb;
   mistakeLimitField.hidden = isBomb || mistakePolicy.value !== "limited";
+  bombMinSecondsField.hidden = !isBomb;
+  bombMaxSecondsField.hidden = !isBomb;
 }
 mistakePolicy.addEventListener("change", syncSettingsVisibility);
 modeSelect.addEventListener("change", syncSettingsVisibility);
@@ -138,6 +144,8 @@ function fillSettingsForm(settings) {
   document.getElementById("setMistakeMode").value = settings.mistakeMode;
   allowedCoalitions.value = settings.allowedCoalitions;
   difficultySelect.value = settings.difficulty;
+  bombMinSecondsInput.value = settings.bombMinSeconds;
+  bombMaxSecondsInput.value = settings.bombMaxSeconds;
   mistakePolicy.value = settings.mistakeLimit === null ? "endless" : settings.mistakeLimit === 0 ? "disabled" : "limited";
   if (Number.isInteger(settings.mistakeLimit) && settings.mistakeLimit > 0) {
     mistakeLimitInput.value = settings.mistakeLimit;
@@ -171,6 +179,8 @@ settingsForm.addEventListener("submit", async (event) => {
     mistakeLimit,
     allowedCoalitions: allowedCoalitions.value,
     difficulty: difficultySelect.value,
+    bombMinSeconds: Number.parseInt(bombMinSecondsInput.value, 10),
+    bombMaxSeconds: Number.parseInt(bombMaxSecondsInput.value, 10),
   };
 
   let result = await api(`/api/lobby/${lobbyId}/settings`, { settings });
