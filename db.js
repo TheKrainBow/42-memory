@@ -95,6 +95,23 @@ if (!gameColumns.includes("settings_json")) {
   db.prepare(`ALTER TABLE games ADD COLUMN settings_json TEXT`).run();
 }
 
+// Bomb mode: circle of eligible players, who currently holds the bomb, and
+// the server-only fuse deadline (never serialized to clients).
+// dismissed_at: the host acknowledged a finished game's results and went
+// back to the lobby settings, without that starting a new game.
+for (const [column, ddl] of [
+  ["bomb_order_json", `ALTER TABLE games ADD COLUMN bomb_order_json TEXT`],
+  ["bomb_alive_json", `ALTER TABLE games ADD COLUMN bomb_alive_json TEXT`],
+  ["bomb_eliminated_json", `ALTER TABLE games ADD COLUMN bomb_eliminated_json TEXT`],
+  ["bomb_holder_id", `ALTER TABLE games ADD COLUMN bomb_holder_id INTEGER`],
+  ["bomb_deadline_at", `ALTER TABLE games ADD COLUMN bomb_deadline_at TEXT`],
+  ["dismissed_at", `ALTER TABLE games ADD COLUMN dismissed_at TEXT`],
+]) {
+  if (!gameColumns.includes(column)) {
+    db.prepare(ddl).run();
+  }
+}
+
 db.exec(`CREATE INDEX IF NOT EXISTS idx_games_lobby ON games(lobby_id, id DESC)`);
 
 export default db;

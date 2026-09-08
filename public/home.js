@@ -47,6 +47,8 @@ function renderLobbies(lobbies) {
       const result = await api(`/api/lobby/${lobbyId}/join`);
       if (result.ok || result.lobbyId) {
         window.location.href = `/lobby/${result.lobbyId ?? lobbyId}`;
+      } else {
+        window.alert(result.error || "Impossible de rejoindre ce salon.");
       }
     });
   }

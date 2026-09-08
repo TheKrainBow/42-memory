@@ -98,7 +98,27 @@ export function mistakeRuleText(settings) {
 }
 
 export function modeName(mode) {
-  return mode === "versus" ? "Horde vs Alliance" : "Coopératif";
+  if (mode === "versus") {
+    return "Horde vs Alliance";
+  }
+  if (mode === "bomb") {
+    return "Bombe";
+  }
+  return "Coopératif";
+}
+
+export function allowedCoalitionsText(settings) {
+  if (settings.allowedCoalitions === "HORDE") {
+    return "Horde uniquement";
+  }
+  if (settings.allowedCoalitions === "ALLIANCE") {
+    return "Alliance uniquement";
+  }
+  return "Horde et Alliance";
+}
+
+export function difficultyName(difficulty) {
+  return difficulty === "hard" ? "Difficile" : "Facile";
 }
 
 export function renderSettingsSummary(el, settings) {
@@ -107,10 +127,12 @@ export function renderSettingsSummary(el, settings) {
   }
   el.innerHTML = `
     <div class="settings-row"><span>Mode</span><strong>${modeName(settings.mode)}</strong></div>
+    <div class="settings-row"><span>Difficulté</span><strong>${escapeHtml(difficultyName(settings.difficulty))}</strong></div>
     <div class="settings-row"><span>Mots affichés</span><strong>${settings.wordCount}</strong></div>
     <div class="settings-row"><span>Mémorisation</span><strong>${settings.revealSeconds}s</strong></div>
     <div class="settings-row"><span>Écriture</span><strong>${formatDuration(settings.writeSeconds * 1000)}</strong></div>
     <div class="settings-row"><span>Erreurs</span><strong>${escapeHtml(mistakeRuleText(settings))}</strong></div>
+    <div class="settings-row"><span>Coalitions</span><strong>${escapeHtml(allowedCoalitionsText(settings))}</strong></div>
   `;
 }
 
@@ -133,7 +155,9 @@ export function lobbyGameRowHtml(game) {
       <span>${modeName(game.settings.mode)}</span>
       <span>${game.foundCount}/${game.wordCount} trouvés · ${escapeHtml(mistakeRuleText(game.settings))}</span>
     </div>
-    <span class="history-status ${game.status === "active" ? "active" : "finished"}">${game.status === "active" ? "En cours" : "Terminée"}</span>
+    <span class="history-status ${game.status === "active" ? "active" : "finished"}">${
+      game.status === "active" ? "En cours" : game.status === "stopped" ? "Arrêtée" : "Terminée"
+    }</span>
   `;
   if (game.status === "active") {
     return `<article class="history-row">${inner}</article>`;
@@ -149,7 +173,7 @@ export function renderLobbyGames(el, games) {
     || `<div class="empty-copy">Aucune partie jouée dans ce salon.</div>`;
 }
 
-export function renderMembers(el, members, settings) {
+export function renderMembers(el, members) {
   if (!el) {
     return;
   }
@@ -159,7 +183,7 @@ export function renderMembers(el, members, settings) {
         ${member.imageUrl ? `<img class="avatar" src="${escapeHtml(member.imageUrl)}" alt="" />` : `<span class="avatar avatar-placeholder"></span>`}
         <strong class="member-login">${escapeHtml(member.login)}</strong>
         ${member.isHost ? `<span class="badge badge-host">Hôte</span>` : ""}
-        ${settings?.mode === "versus" ? `<img class="member-emblem" src="${coalitionEmblem(member.coalition)}" alt="${coalitionName(member.coalition)}" />` : ""}
+        <img class="member-emblem" src="${coalitionEmblem(member.coalition)}" alt="${coalitionName(member.coalition)}" />
       </div>
     `)
     .join("") || `<div class="empty-copy">Personne pour le moment.</div>`;

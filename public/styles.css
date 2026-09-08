@@ -511,9 +511,9 @@ h1 {
 
 .tv-topbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 14px;
-  align-items: start;
+  align-items: center;
 }
 
 .tv-stats {
@@ -1191,6 +1191,9 @@ h1 {
 .member-list {
   display: grid;
   gap: 8px;
+  max-height: min(520px, 60vh);
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .member-row {
@@ -1347,11 +1350,6 @@ h1 {
 }
 
 .versus-scores {
-  position: absolute;
-  top: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 3;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -1360,6 +1358,7 @@ h1 {
   border: 1px solid var(--line);
   background: rgba(10, 14, 22, 0.78);
   backdrop-filter: blur(10px);
+  flex-shrink: 0;
 }
 
 .versus-scores img {
@@ -1668,4 +1667,245 @@ h1 {
   .history-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* Bomb mode ------------------------------------------------------------- */
+
+.bomb-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 24px;
+}
+
+.bomb-circle {
+  position: relative;
+  width: min(70vh, 640px);
+  height: min(70vh, 640px);
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+}
+
+.bomb-core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  width: 84px;
+  height: 84px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle, rgba(255, 122, 68, 0.28), rgba(10, 14, 22, 0.85));
+  border: 1px solid var(--line);
+  box-shadow: 0 0 40px rgba(255, 122, 68, 0.25);
+  transition: width 0.3s ease, height 0.3s ease;
+}
+
+.bomb-icon {
+  font-size: 34px;
+  animation: bomb-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes bomb-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
+}
+
+/* Winner takeover at game end: the bomb core grows and swaps to the
+   winner's avatar/login/coalition, replacing the icon entirely. */
+.bomb-core.bomb-core-winner {
+  width: 220px;
+  height: 220px;
+  gap: 10px;
+  padding: 16px;
+  background: radial-gradient(circle, rgba(255, 208, 126, 0.28), rgba(10, 14, 22, 0.9));
+  box-shadow: 0 0 70px rgba(255, 208, 126, 0.35);
+}
+
+.bomb-winner-avatar {
+  width: 96px;
+  height: 96px;
+  border-color: var(--accent);
+}
+
+.bomb-winner-login {
+  font-size: 22px;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.bomb-winner-emblem {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+
+/* Base state points up (0deg); JS rotates it clockwise to the holder's
+   angle, which is measured the same way the player dots are placed. */
+.bomb-arrow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: calc(var(--arrow-length, 50%) - 42px);
+  transform-origin: bottom center;
+  transform: translate(-50%, -100%);
+  background: linear-gradient(0deg, var(--accent), transparent);
+  border-radius: 999px;
+  transition: height 0.3s ease;
+}
+
+/* Radius is set per-item in JS (multiple rings once there are too many
+   players for one ring to stay legible), angle-x/-y place it on that ring. */
+.bomb-player {
+  position: absolute;
+  top: calc(50% + var(--angle-y) * var(--radius, 42%));
+  left: calc(50% + var(--angle-x) * var(--radius, 42%));
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 96px;
+  text-align: center;
+  transition: opacity 0.3s ease;
+}
+
+.bomb-player strong {
+  font-size: 13px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bomb-player .avatar {
+  width: 52px;
+  height: 52px;
+}
+
+.bomb-player.holding .avatar {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgba(255, 122, 68, 0.28);
+}
+
+.bomb-player.eliminated {
+  opacity: 0.55;
+}
+
+.bomb-player.eliminated .avatar {
+  filter: grayscale(1) brightness(0.7);
+  border-color: var(--danger);
+}
+
+/* Past a player-count threshold, rings pack tighter than a full avatar+name
+   item can fit — shrink to avatar-only dots so they stay legible/distinct.
+   The login is still shown for whoever currently holds the bomb (the only
+   one it matters for at a glance), and on hover for everyone else. */
+.bomb-circle-compact .bomb-player {
+  width: auto;
+  gap: 0;
+}
+
+.bomb-circle-compact .bomb-player strong {
+  display: none;
+}
+
+.bomb-circle-compact .bomb-player.holding strong {
+  display: block;
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.bomb-circle-compact .bomb-player .avatar {
+  width: 22px;
+  height: 22px;
+}
+
+.bomb-circle-compact .bomb-player.holding .avatar {
+  box-shadow: 0 0 0 3px rgba(255, 122, 68, 0.35);
+}
+
+.bomb-circle-compact .bomb-rip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.bomb-rip {
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.bomb-stats {
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.bomb-result {
+  display: grid;
+  gap: 10px;
+  max-width: 560px;
+  margin: 16px auto 0;
+}
+
+.bomb-result-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bomb-result-rank {
+  flex: none;
+  min-width: 34px;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.bomb-turn-banner {
+  padding: 14px 18px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  text-align: center;
+  font-weight: 700;
+}
+
+.bomb-turn-banner.your-turn {
+  border-color: var(--accent);
+  background: rgba(146, 191, 255, 0.14);
+  color: var(--accent-2);
+  animation: bomb-pulse 1.2s ease-in-out infinite;
+}
+
+.bomb-turn-banner.eliminated {
+  border-color: var(--danger);
+  color: var(--danger);
 }

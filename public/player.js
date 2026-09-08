@@ -20,10 +20,14 @@ const viewGame = document.getElementById("viewGame");
 const viewFinished = document.getElementById("viewFinished");
 const memberList = document.getElementById("memberList");
 const settingsSummary = document.getElementById("settingsSummary");
+const gameTimerCard = document.getElementById("gameTimerCard");
 const gameTimer = document.getElementById("gameTimer");
 const foundCount = document.getElementById("foundCount");
+const mistakesCard = document.getElementById("mistakesCard");
 const mistakesLabel = document.getElementById("mistakesLabel");
 const mistakesValue = document.getElementById("mistakesValue");
+const bombTurnBanner = document.getElementById("bombTurnBanner");
+const guessHistoryCard = document.getElementById("guessHistoryCard");
 const guessForm = document.getElementById("guessForm");
 const guessInput = document.getElementById("guessInput");
 const guessList = document.getElementById("guessList");
@@ -86,6 +90,55 @@ function mistakesDisplay(game, you) {
   return { label: "Erreurs restantes", value: String(Math.max(0, limit - you.mistakes)) };
 }
 
+// Bomb mode: who currently holds the bomb, or your own eliminated/turn
+// status. No fuse countdown is ever shown — the server never sends one.
+function renderBombTurnBanner(game, members, you) {
+  if (you.eliminated) {
+    bombTurnBanner.textContent = "Vous êtes éliminé — la partie continue sans vous.";
+    bombTurnBanner.className = "bomb-turn-banner eliminated";
+    return;
+  }
+  if (game.bomb.isYourTurn) {
+    bombTurnBanner.textContent = "À vous de jouer !";
+    bombTurnBanner.className = "bomb-turn-banner your-turn";
+    return;
+  }
+  const holder = members.find((member) => member.id === game.bomb.holderId);
+  bombTurnBanner.textContent = holder ? `Tour de ${holder.login}` : "En attente…";
+  bombTurnBanner.className = "bomb-turn-banner";
+}
+
+function renderBombResults(game, members) {
+  const memberById = new Map(members.map((member) => [member.id, member]));
+  const eliminatedDesc = [...game.bomb.eliminated].sort((a, b) => b.place - a.place);
+  const rows = [
+    ...game.bomb.alive.map((id) => ({ id, label: "Survivant" })),
+    ...eliminatedDesc.map((entry) => ({ id: entry.userId, label: `Éliminé (place ${entry.place})` })),
+  ];
+  leaderboardHighlights.innerHTML = `
+    <div class="leaderboard-highlight">
+      <span class="status-label">Mots trouvés</span>
+      <strong>${game.foundCount} / ${game.wordCount}</strong>
+    </div>
+  `;
+  leaderboardList.innerHTML = rows
+    .map((row, index) => {
+      const member = memberById.get(row.id);
+      if (!member) {
+        return "";
+      }
+      return `
+        <div class="leaderboard-row">
+          <span class="leaderboard-rank">#${index + 1}</span>
+          ${member.imageUrl ? `<img class="avatar" src="${escapeHtml(member.imageUrl)}" alt="" />` : ""}
+          <strong class="leaderboard-login">${escapeHtml(member.login)}</strong>
+          <span class="leaderboard-stats">${row.label}</span>
+        </div>
+      `;
+    })
+    .join("") || `<div class="empty-copy">Aucune donnée.</div>`;
+}
+
 function renderResults(game) {
   if (!game.players?.length) {
     leaderboardHighlights.innerHTML = "";
@@ -128,23 +181,36 @@ function applyState(newState) {
   state = newState;
   const { lobby, game, you } = state;
   document.getElementById("lobbyTitle").textContent = lobby.name;
-  renderMembers(memberList, lobby.members, lobby.settings);
+  renderMembers(memberList, lobby.members);
   renderSettingsSummary(settingsSummary, lobby.settings);
   renderLobbyGames(document.getElementById("lobbyGamesList"), lobby.games);
 
   const phase = getPhase(game);
+  const isBomb = game?.settings.mode === "bomb";
   if (!game) {
     showView("waiting");
   } else if (phase.finished) {
     showView("finished");
-    renderResults(game);
+    if (isBomb) {
+      renderBombResults(game, lobby.members);
+    } else {
+      renderResults(game);
+    }
   } else {
     showView("game");
-    renderGuessList(game);
+    mistakesCard.hidden = isBomb;
+    guessHistoryCard.hidden = isBomb;
     foundCount.textContent = `${game.foundCount} / ${game.wordCount}`;
-    const mistakes = mistakesDisplay(game, you);
-    mistakesLabel.textContent = mistakes.label;
-    mistakesValue.textContent = mistakes.value;
+    if (isBomb) {
+      renderBombTurnBanner(game, lobby.members, you);
+    } else {
+      gameTimerCard.hidden = false;
+      bombTurnBanner.hidden = true;
+      renderGuessList(game);
+      const mistakes = mistakesDisplay(game, you);
+      mistakesLabel.textContent = mistakes.label;
+      mistakesValue.textContent = mistakes.value;
+    }
   }
   updateClock();
 }
@@ -156,15 +222,43 @@ function updateClock() {
   if (!game) {
     return;
   }
+  const isBomb = game.settings.mode === "bomb";
   if (phase.finished) {
     // Flip locally as soon as the clock hits zero; the server broadcast with
     // the final standings follows within a second.
     if (!viewGame.hidden) {
       showView("finished");
-      renderResults(game);
+      if (isBomb) {
+        renderBombResults(game, state.lobby.members);
+      } else {
+        renderResults(game);
+      }
     }
     return;
   }
+
+  if (isBomb) {
+    const inReveal = phase.key === "reveal";
+    gameTimerCard.hidden = !inReveal;
+    bombTurnBanner.hidden = inReveal;
+    if (inReveal) {
+      gameTimer.textContent = formatDuration(phase.remainingMs);
+    }
+
+    const eliminated = state.you.eliminated;
+    const canPlay = phase.key === "play" && !eliminated && game.bomb.isYourTurn;
+    guessInput.disabled = !canPlay;
+    guessForm.querySelector("button").disabled = !canPlay;
+    if (eliminated) {
+      message.textContent = "Vous êtes éliminé.";
+      message.className = "message error";
+    } else if (inReveal) {
+      message.textContent = "Mémorisez les mots affichés sur l'écran de l'hôte…";
+      message.className = "message";
+    }
+    return;
+  }
+
   gameTimer.textContent = formatDuration(phase.remainingMs);
 
   const locked = state.you.locked;

@@ -93,7 +93,7 @@ function clampInt(value, min, max, fallback) {
 // mistakeLimit: null = endless, 0 = mistakes rejected outright, N = allowance.
 function normalizeSettings(input) {
   const raw = input ?? {};
-  const mode = raw.mode === "versus" ? "versus" : "coop";
+  const mode = raw.mode === "versus" ? "versus" : raw.mode === "bomb" ? "bomb" : "coop";
   const mistakeMode = raw.mistakeMode === "global" ? "global" : "per_user";
   let mistakeLimit;
   if (raw.mistakeLimit === null || raw.mistakeLimit === "endless" || raw.mistakeLimit === "") {
@@ -101,6 +101,10 @@ function normalizeSettings(input) {
   } else {
     mistakeLimit = clampInt(raw.mistakeLimit, 0, 100000, mistakeMode === "global" ? 50 : 30);
   }
+  const allowedCoalitions = COALITIONS.includes(String(raw.allowedCoalitions || "").toUpperCase())
+    ? String(raw.allowedCoalitions).toUpperCase()
+    : "BOTH";
+  const difficulty = raw.difficulty === "hard" ? "hard" : "easy";
   return {
     mode,
     wordCount: clampInt(raw.wordCount, 10, wordPoolSize(), 200),
@@ -108,7 +112,13 @@ function normalizeSettings(input) {
     writeSeconds: clampInt(raw.writeSeconds, 30, 7200, 300),
     mistakeMode,
     mistakeLimit,
+    allowedCoalitions,
+    difficulty,
   };
+}
+
+function coalitionAllowed(settings, coalition) {
+  return settings.allowedCoalitions === "BOTH" || settings.allowedCoalitions === coalition;
 }
 
 function parseSettings(json) {
@@ -190,8 +200,47 @@ function getActiveGameForLobby(lobbyId) {
   `).get(lobbyId);
 }
 
+// A host-stopped game is excluded here (but stays in the lobby's history via
+// lobbyGames()) so the live view falls straight back to "waiting" — settings
+// editable again — the moment a game is stopped, with no game-over screen.
 function getLatestGameForLobby(lobbyId) {
-  return db.prepare(`SELECT * FROM games WHERE lobby_id = ? ORDER BY id DESC LIMIT 1`).get(lobbyId);
+  return db.prepare(`
+    SELECT * FROM games WHERE lobby_id = ? AND status != 'stopped' AND dismissed_at IS NULL
+    ORDER BY id DESC LIMIT 1
+  `).get(lobbyId);
+}
+
+// ---------------------------------------------------------------------------
+// Bomb mode: players sit in a circle (host-only view); a bomb with a random
+// fuse passes from player to player as they type words from the memorized
+// list; whoever holds it when it goes off is eliminated. The fuse deadline
+// lives only in the DB/server memory and is never sent to clients.
+// ---------------------------------------------------------------------------
+
+const BOMB_FUSE_MIN_MS = 15000;
+const BOMB_FUSE_MAX_MS = 30000;
+const BOMB_MIN_TURN_MS = 2000;
+
+function randomBombFuseMs() {
+  return crypto.randomInt(BOMB_FUSE_MIN_MS, BOMB_FUSE_MAX_MS + 1);
+}
+
+// Walks the fixed circle order starting just after `fromUserId`, returning
+// the first id still in `alive`. Used both for a normal turn pass (correct
+// guess) and after an elimination.
+function nextAlivePlayer(order, alive, fromUserId) {
+  const aliveSet = new Set(alive);
+  const idx = order.indexOf(fromUserId);
+  if (idx === -1) {
+    return alive[0] ?? null;
+  }
+  for (let step = 1; step <= order.length; step += 1) {
+    const candidate = order[(idx + step) % order.length];
+    if (aliveSet.has(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function startLobbyGame(lobby, seedOverride) {
@@ -210,11 +259,24 @@ function startLobbyGame(lobby, seedOverride) {
   const revealAt = new Date(startedAt.getTime() + settings.revealSeconds * 1000);
   const submitUntil = new Date(revealAt.getTime() + settings.writeSeconds * 1000);
 
+  let bombOrder = null;
+  let bombAlive = null;
+  let bombHolder = null;
+  let bombDeadline = null;
+  if (settings.mode === "bomb") {
+    const eligible = lobbyMembers(lobby.id).filter((member) => member.id !== lobby.host_user_id);
+    bombOrder = eligible.map((member) => member.id);
+    bombAlive = [...bombOrder];
+    bombHolder = bombOrder[Math.floor(Math.random() * bombOrder.length)];
+    bombDeadline = new Date(revealAt.getTime() + randomBombFuseMs());
+  }
+
   const result = db.prepare(`
     INSERT INTO games (
       group_key, seed, words_json, word_count, guessed_count, try_count,
-      started_at, reveal_at, submit_until, status, lobby_id, settings_json
-    ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, 'active', ?, ?)
+      started_at, reveal_at, submit_until, status, lobby_id, settings_json,
+      bomb_order_json, bomb_alive_json, bomb_eliminated_json, bomb_holder_id, bomb_deadline_at
+    ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
   `).run(
     `lobby-${lobby.id}`,
     seed,
@@ -224,7 +286,12 @@ function startLobbyGame(lobby, seedOverride) {
     revealAt.toISOString(),
     submitUntil.toISOString(),
     lobby.id,
-    JSON.stringify(settings)
+    JSON.stringify(settings),
+    bombOrder && JSON.stringify(bombOrder),
+    bombAlive && JSON.stringify(bombAlive),
+    bombOrder && JSON.stringify([]),
+    bombHolder,
+    bombDeadline && bombDeadline.toISOString()
   );
   return db.prepare(`SELECT * FROM games WHERE id = ?`).get(result.lastInsertRowid);
 }
@@ -399,6 +466,9 @@ function completeGameIfNeeded(game) {
     return false;
   }
   const settings = parseSettings(game.settings_json);
+  if (settings.mode === "bomb") {
+    return false; // bomb games end only through tickBombGame.
+  }
   const timeUp = new Date(game.submit_until).getTime() <= Date.now();
   const allFound = foundCountForGame(game.id) >= game.word_count;
   const globalBlown =
@@ -412,6 +482,47 @@ function completeGameIfNeeded(game) {
     return true;
   }
   return false;
+}
+
+// Eliminates the current bomb holder once their fuse has expired, then either
+// finishes the game (nobody left, or every word already found) or arms a
+// fresh fuse for the next player in the circle. Returns true if it changed
+// anything (so callers know to broadcast). Safe to call opportunistically
+// (e.g. right before validating a guess) as well as from the 1s ticker.
+function tickBombGame(game) {
+  if (!game || game.status !== "active" || !game.bomb_holder_id) {
+    return false;
+  }
+  const now = Date.now();
+  if (now < new Date(game.reveal_at).getTime()) {
+    return false; // still memorizing, fuse not armed yet
+  }
+  if (!game.bomb_deadline_at || now < new Date(game.bomb_deadline_at).getTime()) {
+    return false;
+  }
+
+  const order = JSON.parse(game.bomb_order_json || "[]");
+  const alive = JSON.parse(game.bomb_alive_json || "[]").filter((id) => id !== game.bomb_holder_id);
+  const eliminated = JSON.parse(game.bomb_eliminated_json || "[]");
+  eliminated.push({ userId: game.bomb_holder_id, place: eliminated.length + 1, eliminatedAt: nowIso() });
+
+  if (alive.length === 0 || foundCountForGame(game.id) >= game.word_count) {
+    db.prepare(`
+      UPDATE games
+      SET status = 'finished', finished_at = ?, bomb_alive_json = ?, bomb_eliminated_json = ?, bomb_holder_id = NULL
+      WHERE id = ?
+    `).run(nowIso(), JSON.stringify(alive), JSON.stringify(eliminated), game.id);
+    return true;
+  }
+
+  const nextHolder = nextAlivePlayer(order, alive, game.bomb_holder_id);
+  const deadline = new Date(now + randomBombFuseMs());
+  db.prepare(`
+    UPDATE games
+    SET bomb_alive_json = ?, bomb_eliminated_json = ?, bomb_holder_id = ?, bomb_deadline_at = ?
+    WHERE id = ?
+  `).run(JSON.stringify(alive), JSON.stringify(eliminated), nextHolder, deadline.toISOString(), game.id);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +572,41 @@ function gameStatePayload(game, { includeWords }) {
   };
 }
 
+// Bomb mode's payload deliberately omits everything the standard payload
+// exposes about found words (correctWords/guesses) and any timing info:
+// players only ever learn a count, never the deadline or the word list.
+function bombStatePayload(game, viewerUserId, includeWords) {
+  if (!game) {
+    return null;
+  }
+  const settings = parseSettings(game.settings_json);
+  const order = JSON.parse(game.bomb_order_json || "[]");
+  const alive = JSON.parse(game.bomb_alive_json || "[]");
+  const eliminated = JSON.parse(game.bomb_eliminated_json || "[]");
+  const finished = game.status !== "active";
+
+  return {
+    id: game.id,
+    seed: game.seed,
+    status: game.status,
+    startedAt: game.started_at,
+    revealAt: game.reveal_at,
+    finishedAt: game.finished_at,
+    wordCount: game.word_count,
+    settings,
+    foundCount: foundCountForGame(game.id),
+    bomb: {
+      order,
+      alive,
+      eliminated,
+      holderId: finished ? null : game.bomb_holder_id,
+      isYourTurn: !finished && game.bomb_holder_id === viewerUserId,
+      youEliminated: eliminated.some((entry) => entry.userId === viewerUserId),
+    },
+    words: includeWords ? JSON.parse(game.words_json) : undefined,
+  };
+}
+
 function buildLobbyState(lobbyId, user) {
   const lobby = getLobby(lobbyId);
   if (!lobby) {
@@ -469,10 +615,15 @@ function buildLobbyState(lobbyId, user) {
   const members = lobbyMembers(lobbyId);
   const isHost = lobby.host_user_id === user.id;
   const game = getLatestGameForLobby(lobbyId);
-  const gamePayload = gameStatePayload(game, { includeWords: isHost });
+  const gameSettings = game ? parseSettings(game.settings_json) : null;
+  const isBomb = gameSettings?.mode === "bomb";
+  const gamePayload = isBomb
+    ? bombStatePayload(game, user.id, isHost)
+    : gameStatePayload(game, { includeWords: isHost });
 
   let locked = false;
   if (
+    !isBomb &&
     gamePayload &&
     gamePayload.status === "active" &&
     gamePayload.settings.mistakeMode === "per_user" &&
@@ -493,15 +644,16 @@ function buildLobbyState(lobbyId, user) {
       members: members.map((member) => ({
         ...publicUser(member),
         isHost: member.id === lobby.host_user_id,
-        mistakes: gamePayload ? gamePayload.mistakes[member.id] ?? 0 : 0,
+        mistakes: !isBomb && gamePayload ? gamePayload.mistakes[member.id] ?? 0 : 0,
       })),
     },
     game: gamePayload,
     you: {
       ...publicUser(user),
       role: isHost ? "host" : "player",
-      mistakes: gamePayload ? gamePayload.mistakes[user.id] ?? 0 : 0,
+      mistakes: !isBomb && gamePayload ? gamePayload.mistakes[user.id] ?? 0 : 0,
       locked,
+      eliminated: isBomb ? Boolean(gamePayload?.bomb.youEliminated) : false,
     },
   };
 }
@@ -537,6 +689,19 @@ function broadcastLobbyClosed(lobbyId) {
   }
   for (const ws of sockets) {
     wsSend(ws, { type: "closed" });
+  }
+}
+
+function kickMember(lobbyId, userId) {
+  db.prepare(`DELETE FROM lobby_members WHERE user_id = ? AND lobby_id = ?`).run(userId, lobbyId);
+  const sockets = lobbySockets.get(lobbyId);
+  if (!sockets) {
+    return;
+  }
+  for (const ws of sockets) {
+    if (ws.user?.id === userId) {
+      wsSend(ws, { type: "closed" });
+    }
   }
 }
 
@@ -773,6 +938,9 @@ app.post("/api/lobby/:id/join", requireApiAuth, withLobby, (req, res) => {
   if (current) {
     return res.status(409).json({ error: "Vous êtes déjà dans un autre salon", lobbyId: current });
   }
+  if (!coalitionAllowed(req.lobby.settings, req.user.coalition)) {
+    return res.status(403).json({ error: "Votre coalition n'est pas autorisée dans ce salon" });
+  }
   joinLobby(req.user, req.lobby);
   notifyLobbyChange(req.lobby.id);
   return res.json({ ok: true, lobbyId: req.lobby.id });
@@ -804,9 +972,19 @@ app.post("/api/lobby/:id/settings", requireApiAuth, withLobby, (req, res) => {
     return res.status(409).json({ error: "Impossible de modifier les règles pendant une partie" });
   }
   const settings = normalizeSettings(req.body?.settings ?? req.body);
+  const confirm = Boolean(req.body?.confirm);
+  const toKick = lobbyMembers(req.lobby.id).filter(
+    (member) => member.id !== req.lobby.host_user_id && !coalitionAllowed(settings, member.coalition)
+  );
+  if (toKick.length && !confirm) {
+    return res.status(409).json({ error: "faction_conflict", kicked: toKick.length });
+  }
+  for (const member of toKick) {
+    kickMember(req.lobby.id, member.id);
+  }
   db.prepare(`UPDATE lobbies SET settings_json = ? WHERE id = ?`).run(JSON.stringify(settings), req.lobby.id);
   notifyLobbyChange(req.lobby.id);
-  return res.json({ ok: true, settings });
+  return res.json({ ok: true, settings, kicked: toKick.length });
 });
 
 app.get("/api/me/history", requireApiAuth, (req, res) => {
@@ -831,11 +1009,120 @@ app.post("/api/lobby/:id/start", requireApiAuth, withLobby, (req, res) => {
   if (req.lobby.host_user_id !== req.user.id) {
     return res.status(403).json({ error: "Seul l'hôte peut lancer une partie" });
   }
+  if (req.lobby.settings.mode === "bomb") {
+    const eligible = lobbyMembers(req.lobby.id).filter((member) => member.id !== req.lobby.host_user_id);
+    if (eligible.length < 2) {
+      return res.status(400).json({ error: "Il faut au moins 2 joueurs (hors hôte) pour le mode Bombe" });
+    }
+  }
   const requestedSeed = Number.parseInt(req.body?.seed ?? "", 10);
   const game = startLobbyGame(req.lobby, Number.isFinite(requestedSeed) ? requestedSeed : undefined);
   notifyLobbyChange(req.lobby.id);
   return res.json({ ok: true, gameId: game.id, seed: game.seed });
 });
+
+// Ends the current game early without starting a new one: the lobby falls
+// back to the waiting/settings view (getLatestGameForLobby skips 'stopped'
+// games), so the host can tweak settings without losing the game from the
+// lobby's history.
+app.post("/api/lobby/:id/stop", requireApiAuth, withLobby, (req, res) => {
+  if (req.lobby.host_user_id !== req.user.id) {
+    return res.status(403).json({ error: "Seul l'hôte peut arrêter la partie" });
+  }
+  const game = getActiveGameForLobby(req.lobby.id);
+  if (!game) {
+    return res.status(409).json({ error: "Aucune partie en cours" });
+  }
+  db.prepare(`
+    UPDATE games SET status = 'stopped', finished_at = COALESCE(finished_at, ?), bomb_holder_id = NULL
+    WHERE id = ?
+  `).run(nowIso(), game.id);
+  notifyLobbyChange(req.lobby.id);
+  broadcastHome();
+  return res.json({ ok: true });
+});
+
+// Acknowledges a finished game's results and returns everyone to the
+// waiting/settings view, without starting a new game (unlike /start, which
+// would also work but immediately launches a fresh round).
+app.post("/api/lobby/:id/dismiss", requireApiAuth, withLobby, (req, res) => {
+  if (req.lobby.host_user_id !== req.user.id) {
+    return res.status(403).json({ error: "Seul l'hôte peut revenir aux réglages" });
+  }
+  const game = getLatestGameForLobby(req.lobby.id);
+  if (!game || game.status === "active") {
+    return res.status(409).json({ error: "Aucune partie terminée à fermer" });
+  }
+  db.prepare(`UPDATE games SET dismissed_at = ? WHERE id = ?`).run(nowIso(), game.id);
+  notifyLobbyChange(req.lobby.id);
+  return res.json({ ok: true });
+});
+
+// Bomb mode: only the current holder may guess; a correct new word passes
+// the bomb to the next alive player (extending the fuse to a 2s minimum if
+// it was about to expire); an already-found word is a no-op message; a wrong
+// word just fails silently, no elimination, no turn change.
+function handleBombGuess(req, res, game, user) {
+  if (tickBombGame(game)) {
+    notifyLobbyChange(req.lobby.id);
+    game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(game.id);
+  }
+  if (game.status !== "active") {
+    return res.status(403).json({ error: "Partie terminée" });
+  }
+
+  const now = Date.now();
+  if (now < new Date(game.reveal_at).getTime()) {
+    return res.status(403).json({ error: "Phase de mémorisation en cours" });
+  }
+  if (game.bomb_holder_id !== user.id) {
+    return res.status(403).json({ error: "Ce n'est pas votre tour" });
+  }
+
+  const rawWord = String(req.body?.word ?? "").trim();
+  const normalizedWord = normalizeGuess(rawWord);
+  if (!normalizedWord) {
+    return res.status(400).json({ error: "Mot invalide" });
+  }
+
+  const alreadyFound = db.prepare(`
+    SELECT 1 FROM guesses WHERE game_id = ? AND normalized_word = ? AND is_correct = 1 LIMIT 1
+  `).get(game.id, normalizedWord);
+  if (alreadyFound) {
+    return res.json({ ok: true, correct: false, alreadyFound: true });
+  }
+
+  const words = new Set(JSON.parse(game.words_json).map((word) => normalizeGuess(word)));
+  if (!words.has(normalizedWord)) {
+    return res.json({ ok: true, correct: false });
+  }
+
+  db.prepare(`
+    INSERT INTO guesses (game_id, raw_word, normalized_word, is_correct, created_at, user_id)
+    VALUES (?, ?, ?, 1, ?, ?)
+  `).run(game.id, rawWord, normalizedWord, nowIso(), user.id);
+
+  if (foundCountForGame(game.id) >= game.word_count) {
+    db.prepare(`UPDATE games SET status = 'finished', finished_at = ?, bomb_holder_id = NULL WHERE id = ?`)
+      .run(nowIso(), game.id);
+    notifyLobbyChange(req.lobby.id);
+    broadcastHome();
+    return res.json({ ok: true, correct: true, gameOver: true });
+  }
+
+  const order = JSON.parse(game.bomb_order_json || "[]");
+  const alive = JSON.parse(game.bomb_alive_json || "[]");
+  const nextHolder = nextAlivePlayer(order, alive, user.id);
+  let deadlineMs = new Date(game.bomb_deadline_at).getTime();
+  if (deadlineMs - now < BOMB_MIN_TURN_MS) {
+    deadlineMs = now + BOMB_MIN_TURN_MS;
+  }
+  db.prepare(`UPDATE games SET bomb_holder_id = ?, bomb_deadline_at = ? WHERE id = ?`)
+    .run(nextHolder, new Date(deadlineMs).toISOString(), game.id);
+
+  notifyLobbyChange(req.lobby.id);
+  return res.json({ ok: true, correct: true });
+}
 
 app.post("/api/lobby/:id/guess", requireApiAuth, withLobby, (req, res) => {
   const user = req.user;
@@ -847,6 +1134,12 @@ app.post("/api/lobby/:id/guess", requireApiAuth, withLobby, (req, res) => {
   if (!game) {
     return res.status(409).json({ error: "Aucune partie en cours" });
   }
+
+  const settings = parseSettings(game.settings_json);
+  if (settings.mode === "bomb") {
+    return handleBombGuess(req, res, game, user);
+  }
+
   if (completeGameIfNeeded(game)) {
     broadcastLobby(req.lobby.id);
     return res.status(403).json({ error: "Partie terminée" });
@@ -857,7 +1150,6 @@ app.post("/api/lobby/:id/guess", requireApiAuth, withLobby, (req, res) => {
     return res.status(403).json({ error: "Phase de mémorisation en cours" });
   }
 
-  const settings = parseSettings(game.settings_json);
   const rawWord = String(req.body?.word ?? "").trim();
   const normalizedWord = normalizeGuess(rawWord);
   if (!normalizedWord) {
@@ -1015,12 +1307,18 @@ function renderHostPage(user, lobby) {
             </div>
             <div class="status-pill" id="phasePill">En attente</div>
           </div>
+          <div class="versus-scores" id="versusScores" hidden>
+            <span class="score-horde"><img src="/assets/horde.svg" alt="Horde" /><strong id="scoreHorde">0</strong></span>
+            <span class="score-vs">VS</span>
+            <span class="score-alliance"><strong id="scoreAlliance">0</strong><img src="/assets/alliance.svg" alt="Alliance" /></span>
+          </div>
           <div class="host-controls">
             <label class="seed-field seed-inline">
               <span>Seed</span>
               <input id="seedInput" inputmode="numeric" />
             </label>
             <button type="button" class="ghost-button" id="randomSeedButton">Aléatoire</button>
+            <button type="button" class="ghost-button" id="dismissGameButton" hidden>Modifier les réglages</button>
             <button type="button" class="primary" id="startGameButton">Lancer une partie</button>
             <button type="button" class="ghost-button danger-button" id="closeLobbyButton">Fermer le salon</button>
           </div>
@@ -1056,7 +1354,7 @@ function renderHostPage(user, lobby) {
                       <span>Mémorisation (s)</span>
                       <input id="setRevealSeconds" type="number" min="5" max="600" />
                     </label>
-                    <label class="seed-field">
+                    <label class="seed-field" id="writeSecondsField">
                       <span>Écriture (s)</span>
                       <input id="setWriteSeconds" type="number" min="30" max="7200" />
                     </label>
@@ -1065,16 +1363,17 @@ function renderHostPage(user, lobby) {
                       <select id="setMode">
                         <option value="coop">Coopératif</option>
                         <option value="versus">Horde vs Alliance</option>
+                        <option value="bomb">Bombe</option>
                       </select>
                     </label>
-                    <label class="seed-field">
+                    <label class="seed-field" id="mistakeModeField">
                       <span>Erreurs</span>
                       <select id="setMistakeMode">
                         <option value="per_user">Par joueur</option>
                         <option value="global">Globales</option>
                       </select>
                     </label>
-                    <label class="seed-field">
+                    <label class="seed-field" id="mistakePolicyField">
                       <span>Limite d'erreurs</span>
                       <select id="setMistakePolicy">
                         <option value="limited">Limitées</option>
@@ -1085,6 +1384,21 @@ function renderHostPage(user, lobby) {
                     <label class="seed-field" id="mistakeLimitField">
                       <span>Nombre d'erreurs</span>
                       <input id="setMistakeLimit" type="number" min="1" max="100000" />
+                    </label>
+                    <label class="seed-field">
+                      <span>Coalitions autorisées</span>
+                      <select id="setAllowedCoalitions">
+                        <option value="BOTH">Horde et Alliance</option>
+                        <option value="HORDE">Horde uniquement</option>
+                        <option value="ALLIANCE">Alliance uniquement</option>
+                      </select>
+                    </label>
+                    <label class="seed-field">
+                      <span>Difficulté</span>
+                      <select id="setDifficulty">
+                        <option value="easy">Facile</option>
+                        <option value="hard">Difficile</option>
+                      </select>
                     </label>
                   </div>
                   <div class="launch-actions">
@@ -1109,11 +1423,6 @@ function renderHostPage(user, lobby) {
           <div class="host-view" id="viewBoard" hidden>
             <div class="tv-board-shell">
               <div class="tv-board-frame">
-                <div class="versus-scores" id="versusScores" hidden>
-                  <span class="score-horde"><img src="/assets/horde.svg" alt="Horde" /><strong id="scoreHorde">0</strong></span>
-                  <span class="score-vs">VS</span>
-                  <span class="score-alliance"><strong id="scoreAlliance">0</strong><img src="/assets/alliance.svg" alt="Alliance" /></span>
-                </div>
                 <div class="board board-live" id="wordBoard"></div>
                 <div class="tv-footer-pill" id="boardFooter">PHASE DE JEU</div>
               </div>
@@ -1123,6 +1432,22 @@ function renderHostPage(user, lobby) {
               <article class="status-card stat-card"><span class="status-label">Trouvés</span><strong class="status-value" id="tvFound">0 / 0</strong></article>
               <article class="status-card stat-card"><span class="status-label">Erreurs</span><strong class="status-value" id="tvMistakes">0</strong></article>
             </div>
+          </div>
+
+          <div class="host-view" id="viewBomb" hidden>
+            <div class="bomb-shell">
+              <div class="bomb-circle" id="bombCircle">
+                <div class="bomb-core" id="bombCore">
+                  <span class="bomb-icon">💣</span>
+                </div>
+                <div class="bomb-arrow" id="bombArrow" hidden></div>
+              </div>
+            </div>
+            <div class="tv-stats host-game-stats bomb-stats">
+              <article class="status-card stat-card"><span class="status-label">Trouvés</span><strong class="status-value" id="bombFound">0 / 0</strong></article>
+              <article class="status-card stat-card"><span class="status-label">Survivants</span><strong class="status-value" id="bombAliveCount">0</strong></article>
+            </div>
+            <div class="bomb-result" id="bombResult" hidden></div>
           </div>
 
           <div class="host-view" id="viewStats" hidden>
@@ -1204,11 +1529,12 @@ function renderPlayerPage(user, lobby) {
         </div>
 
         <div class="player-view" id="viewGame" hidden>
-          <section class="tablet-stats">
-            <article class="status-card stat-card"><span class="status-label">Temps</span><strong class="status-value" id="gameTimer">0:00</strong></article>
+          <section class="tablet-stats" id="gameStats">
+            <article class="status-card stat-card" id="gameTimerCard"><span class="status-label">Temps</span><strong class="status-value" id="gameTimer">0:00</strong></article>
             <article class="status-card stat-card"><span class="status-label">Trouvés</span><strong class="status-value" id="foundCount">0 / 0</strong></article>
-            <article class="status-card stat-card"><span class="status-label" id="mistakesLabel">Erreurs restantes</span><strong class="status-value" id="mistakesValue">-</strong></article>
+            <article class="status-card stat-card" id="mistakesCard"><span class="status-label" id="mistakesLabel">Erreurs restantes</span><strong class="status-value" id="mistakesValue">-</strong></article>
           </section>
+          <div class="bomb-turn-banner" id="bombTurnBanner" hidden></div>
           <section class="tablet-layout">
             <form class="submit-card" id="guessForm">
               <div class="panel-kicker">Saisir les réponses</div>
@@ -1218,7 +1544,7 @@ function renderPlayerPage(user, lobby) {
               </div>
               <div class="message" id="message"></div>
             </form>
-            <section class="submit-card">
+            <section class="submit-card" id="guessHistoryCard">
               <div class="panel-kicker">Dernières réponses</div>
               <div id="guessList" class="guess-list"></div>
             </section>
@@ -1480,7 +1806,8 @@ setInterval(() => {
     WHERE g.status = 'active' AND l.status = 'open'
   `).all();
   for (const game of activeGames) {
-    if (completeGameIfNeeded(game)) {
+    const changed = game.bomb_holder_id ? tickBombGame(game) : completeGameIfNeeded(game);
+    if (changed) {
       notifyLobbyChange(game.lobby_id);
     }
   }
