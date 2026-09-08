@@ -251,8 +251,8 @@ window.addEventListener("resize", scheduleLayout, { passive: true });
 // canvas), same as the static layout, so resizing just rescales them.
 // ---------------------------------------------------------------------------
 
-const HARD_MODE_MIN_SPEED = 40; // virtual canvas px/sec
-const HARD_MODE_MAX_SPEED = 90;
+const HARD_MODE_MIN_SPEED = 20; // virtual canvas px/sec
+const HARD_MODE_MAX_SPEED = 45;
 const HARD_MODE_EDGE_MARGIN = 20; // virtual canvas px
 
 let hardModeRaf = null;
