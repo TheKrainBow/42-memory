@@ -581,7 +581,10 @@ function gameStatePayload(game, { includeWords }) {
 // Bomb mode's payload deliberately omits everything the standard payload
 // exposes about found words (correctWords/guesses) and any timing info:
 // players only ever learn a count, never the deadline or the word list.
-function bombStatePayload(game, viewerUserId, includeWords) {
+// isYourTurn/youEliminated are viewer-dependent and are attached later, per
+// socket, from the (cheap, in-memory) holderId/eliminated fields below —
+// see attachViewerFields.
+function bombStatePayload(game) {
   if (!game) {
     return null;
   }
@@ -606,37 +609,61 @@ function bombStatePayload(game, viewerUserId, includeWords) {
       alive,
       eliminated,
       holderId: finished ? null : game.bomb_holder_id,
-      isYourTurn: !finished && game.bomb_holder_id === viewerUserId,
-      youEliminated: eliminated.some((entry) => entry.userId === viewerUserId),
     },
-    words: includeWords ? JSON.parse(game.words_json) : undefined,
+    words: JSON.parse(game.words_json),
   };
 }
 
-function buildLobbyState(lobbyId, user) {
+// Builds the parts of lobby state that are identical for every viewer (all
+// the DB reads live here), so a broadcast only has to run this once per
+// lobby instead of once per connected socket. Per-viewer fields (word
+// visibility, bomb turn/elimination, mistake lock) are filled in afterwards
+// by attachViewerFields, from data already in memory.
+function buildSharedLobbyState(lobbyId) {
   const lobby = getLobby(lobbyId);
   if (!lobby) {
     return null;
   }
   const members = lobbyMembers(lobbyId);
-  const isHost = lobby.host_user_id === user.id;
+  const games = lobbyGames(lobbyId);
   const game = getLatestGameForLobby(lobbyId);
   const gameSettings = game ? parseSettings(game.settings_json) : null;
   const isBomb = gameSettings?.mode === "bomb";
-  const gamePayload = isBomb
-    ? bombStatePayload(game, user.id, isHost)
-    : gameStatePayload(game, { includeWords: isHost });
+  const gamePayload = isBomb ? bombStatePayload(game) : gameStatePayload(game, { includeWords: true });
+
+  return { lobby, members, games, isBomb, gamePayload };
+}
+
+function attachViewerFields(shared, user) {
+  const { lobby, members, games, isBomb, gamePayload } = shared;
+  const isHost = lobby.host_user_id === user.id;
+
+  let viewerGamePayload = gamePayload;
+  if (gamePayload) {
+    viewerGamePayload = { ...gamePayload };
+    if (!isHost) {
+      viewerGamePayload.words = undefined;
+    }
+    if (isBomb) {
+      const finished = viewerGamePayload.status !== "active";
+      viewerGamePayload.bomb = {
+        ...viewerGamePayload.bomb,
+        isYourTurn: !finished && viewerGamePayload.bomb.holderId === user.id,
+        youEliminated: viewerGamePayload.bomb.eliminated.some((entry) => entry.userId === user.id),
+      };
+    }
+  }
 
   let locked = false;
   if (
     !isBomb &&
-    gamePayload &&
-    gamePayload.status === "active" &&
-    gamePayload.settings.mistakeMode === "per_user" &&
-    Number.isInteger(gamePayload.settings.mistakeLimit) &&
-    gamePayload.settings.mistakeLimit > 0
+    viewerGamePayload &&
+    viewerGamePayload.status === "active" &&
+    viewerGamePayload.settings.mistakeMode === "per_user" &&
+    Number.isInteger(viewerGamePayload.settings.mistakeLimit) &&
+    viewerGamePayload.settings.mistakeLimit > 0
   ) {
-    locked = (gamePayload.mistakes[user.id] ?? 0) >= gamePayload.settings.mistakeLimit;
+    locked = (viewerGamePayload.mistakes[user.id] ?? 0) >= viewerGamePayload.settings.mistakeLimit;
   }
 
   return {
@@ -646,22 +673,30 @@ function buildLobbyState(lobbyId, user) {
       status: lobby.status,
       settings: lobby.settings,
       hostId: lobby.host_user_id,
-      games: lobbyGames(lobbyId),
+      games,
       members: members.map((member) => ({
         ...publicUser(member),
         isHost: member.id === lobby.host_user_id,
-        mistakes: !isBomb && gamePayload ? gamePayload.mistakes[member.id] ?? 0 : 0,
+        mistakes: !isBomb && viewerGamePayload ? viewerGamePayload.mistakes[member.id] ?? 0 : 0,
       })),
     },
-    game: gamePayload,
+    game: viewerGamePayload,
     you: {
       ...publicUser(user),
       role: isHost ? "host" : "player",
-      mistakes: !isBomb && gamePayload ? gamePayload.mistakes[user.id] ?? 0 : 0,
+      mistakes: !isBomb && viewerGamePayload ? viewerGamePayload.mistakes[user.id] ?? 0 : 0,
       locked,
-      eliminated: isBomb ? Boolean(gamePayload?.bomb.youEliminated) : false,
+      eliminated: isBomb ? Boolean(viewerGamePayload?.bomb.youEliminated) : false,
     },
   };
+}
+
+function buildLobbyState(lobbyId, user) {
+  const shared = buildSharedLobbyState(lobbyId);
+  if (!shared) {
+    return null;
+  }
+  return attachViewerFields(shared, user);
 }
 
 // ---------------------------------------------------------------------------
@@ -682,10 +717,33 @@ function broadcastLobby(lobbyId) {
   if (!sockets?.size) {
     return;
   }
-  for (const ws of sockets) {
-    const state = buildLobbyState(lobbyId, ws.user);
-    wsSend(ws, state ? { type: "state", state } : { type: "closed" });
+  const shared = buildSharedLobbyState(lobbyId);
+  if (!shared) {
+    for (const ws of sockets) {
+      wsSend(ws, { type: "closed" });
+    }
+    return;
   }
+  for (const ws of sockets) {
+    const state = attachViewerFields(shared, ws.user);
+    wsSend(ws, { type: "state", state });
+  }
+}
+
+// Coalesces bursts of broadcast requests (e.g. many guesses arriving in the
+// same tick) into a single rebuild + fan-out per lobby, instead of once per
+// event.
+const pendingBroadcast = new Set(); // lobbyId
+
+function scheduleBroadcastLobby(lobbyId) {
+  if (pendingBroadcast.has(lobbyId)) {
+    return;
+  }
+  pendingBroadcast.add(lobbyId);
+  setImmediate(() => {
+    pendingBroadcast.delete(lobbyId);
+    broadcastLobby(lobbyId);
+  });
 }
 
 function broadcastLobbyClosed(lobbyId) {
@@ -722,7 +780,7 @@ function broadcastHome() {
 }
 
 function notifyLobbyChange(lobbyId) {
-  broadcastLobby(lobbyId);
+  scheduleBroadcastLobby(lobbyId);
   broadcastHome();
 }
 
@@ -1147,7 +1205,7 @@ app.post("/api/lobby/:id/guess", requireApiAuth, withLobby, (req, res) => {
   }
 
   if (completeGameIfNeeded(game)) {
-    broadcastLobby(req.lobby.id);
+    scheduleBroadcastLobby(req.lobby.id);
     return res.status(403).json({ error: "Partie terminée" });
   }
 
@@ -1184,7 +1242,7 @@ app.post("/api/lobby/:id/guess", requireApiAuth, withLobby, (req, res) => {
       INSERT INTO guesses (game_id, raw_word, normalized_word, is_correct, created_at, user_id)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(game.id, rawWord, normalizedWord, previous.is_correct ? 1 : 0, nowIso(), user.id);
-    broadcastLobby(req.lobby.id);
+    scheduleBroadcastLobby(req.lobby.id);
     return res.json({
       ok: true,
       correct: false,
@@ -1209,7 +1267,7 @@ app.post("/api/lobby/:id/guess", requireApiAuth, withLobby, (req, res) => {
   `).run(game.id, rawWord, normalizedWord, isCorrect ? 1 : 0, nowIso(), user.id);
 
   const finishedNow = completeGameIfNeeded(db.prepare(`SELECT * FROM games WHERE id = ?`).get(game.id));
-  broadcastLobby(req.lobby.id);
+  scheduleBroadcastLobby(req.lobby.id);
   if (finishedNow) {
     broadcastHome();
   }
