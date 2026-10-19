@@ -11,6 +11,7 @@ import {
   destroySession,
   exchangeCode,
   fetchIntraProfile,
+  getApiToken,
   getImageToken,
   getSessionUser,
   parseCookies,
@@ -927,6 +928,39 @@ app.get("/api/me", (req, res) => {
   res.json({ user: publicUser(getSessionUser(req)) });
 });
 
+// The DB's image_url is only a snapshot taken at that user's last login, and
+// goes stale (404s against intra) for anyone who hasn't logged back in since
+// — so this resolves the current URL live instead, with a short cache to
+// avoid hitting the 42 API on every avatar request. Falls back to the DB
+// snapshot if the live lookup itself fails (rate limit, transient error).
+const avatarUrlCache = new Map(); // login -> { url, fetchedAt }
+const AVATAR_URL_TTL = 60 * 60 * 1000; // 1 hour
+
+async function resolveAvatarUrl(login) {
+  const cached = avatarUrlCache.get(login);
+  if (cached && Date.now() - cached.fetchedAt < AVATAR_URL_TTL) {
+    return cached.url;
+  }
+  try {
+    const apiToken = await getApiToken();
+    const response = await fetch(`https://api.intra.42.fr/v2/users/${encodeURIComponent(login)}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (!response.ok) {
+      throw new Error(`Intra user lookup failed (${response.status})`);
+    }
+    const data = await response.json();
+    const url = (data.image && data.image.versions && data.image.versions.small) ||
+      (data.image && data.image.link) || null;
+    avatarUrlCache.set(login, { url, fetchedAt: Date.now() });
+    return url;
+  } catch (err) {
+    console.error("Avatar URL lookup error:", err.message);
+    const row = db.prepare(`SELECT image_url FROM users WHERE login = ?`).get(login);
+    return row?.image_url || null;
+  }
+}
+
 // Streams a user's 42 avatar bytes server-side instead of letting the
 // browser hotlink intra's CDN directly, since that now requires a bearer
 // token the browser can't provide — and this way the token stays backend-only.
@@ -938,13 +972,13 @@ app.get("/api/avatar/:login", async (req, res) => {
   if (!login) {
     return res.status(400).end();
   }
-  const row = db.prepare(`SELECT image_url FROM users WHERE login = ?`).get(login);
-  if (!row?.image_url) {
-    return res.status(404).end();
-  }
   try {
+    const imageUrl = await resolveAvatarUrl(login);
+    if (!imageUrl) {
+      return res.status(404).end();
+    }
     const token = await getImageToken();
-    const upstream = await fetch(row.image_url, { headers: { Authorization: `Bearer ${token}` } });
+    const upstream = await fetch(imageUrl, { headers: { Authorization: `Bearer ${token}` } });
     if (!upstream.ok) {
       return res.status(404).end();
     }

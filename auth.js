@@ -100,6 +100,37 @@ async function fetchIntra(path, accessToken) {
   return response.json();
 }
 
+// A client-credentials token for server-to-server calls (resolving a user's
+// current avatar URL), independent of any particular user's session. Used
+// by /api/avatar/:login instead of trusting the image_url snapshot taken at
+// that user's last login, which goes stale — and 404s — for anyone who
+// hasn't logged back in since.
+let apiTokenCache = null;
+let apiTokenCacheTime = 0;
+const API_TOKEN_TTL = 55 * 60 * 1000; // 55 minutes
+
+export async function getApiToken() {
+  if (apiTokenCache && Date.now() - apiTokenCacheTime < API_TOKEN_TTL) {
+    return apiTokenCache;
+  }
+  const response = await fetch(FT_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: FT_CLIENT_ID,
+      client_secret: FT_CLIENT_SECRET,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`API token request failed (${response.status})`);
+  }
+  const data = await response.json();
+  apiTokenCache = data.access_token;
+  apiTokenCacheTime = Date.now();
+  return apiTokenCache;
+}
+
 // Intra's CDN rejects a per-user delegated token for avatar image bytes and
 // requires one scoped to just "public" instead, so this is cached separately
 // from any user's session token. It never leaves the backend: every <img>
