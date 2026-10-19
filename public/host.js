@@ -424,7 +424,7 @@ function renderBombCircle(game, members) {
     el.style.setProperty("--angle-y", String(Math.sin(placement.angle)));
     el.style.setProperty("--radius", `${placement.radius * 100}%`);
     el.innerHTML = `
-      ${member.imageUrl ? `<img class="avatar" src="${escapeHtml(member.imageUrl)}" alt="" />` : `<span class="avatar avatar-placeholder"></span>`}
+      ${member.imageUrl ? `<img class="avatar" src="/api/avatar/${escapeHtml(member.login)}" alt="" />` : `<span class="avatar avatar-placeholder"></span>`}
       <strong>${escapeHtml(member.login)}</strong>
       ${alive ? "" : `<span class="bomb-rip">RIP</span>`}
     `;
@@ -462,7 +462,7 @@ function renderBombCore(winner) {
   }
   bombCore.classList.add("bomb-core-winner");
   bombCore.innerHTML = `
-    ${winner.imageUrl ? `<img class="avatar bomb-winner-avatar" src="${escapeHtml(winner.imageUrl)}" alt="" />` : `<span class="avatar bomb-winner-avatar avatar-placeholder"></span>`}
+    ${winner.imageUrl ? `<img class="avatar bomb-winner-avatar" src="/api/avatar/${escapeHtml(winner.login)}" alt="" />` : `<span class="avatar bomb-winner-avatar avatar-placeholder"></span>`}
     <strong class="bomb-winner-login">${escapeHtml(winner.login)}</strong>
     ${winner.coalition ? `<img class="bomb-winner-emblem" src="${coalitionEmblem(winner.coalition)}" alt="" />` : ""}
   `;
@@ -486,7 +486,7 @@ function renderBombResult(game, members) {
         return `
           <div class="bomb-result-row">
             <span class="bomb-result-rank">#${index + 1}</span>
-            ${member.imageUrl ? `<img class="avatar avatar-sm" src="${escapeHtml(member.imageUrl)}" alt="" />` : `<span class="avatar avatar-sm avatar-placeholder"></span>`}
+            ${member.imageUrl ? `<img class="avatar avatar-sm" src="/api/avatar/${escapeHtml(member.login)}" alt="" />` : `<span class="avatar avatar-sm avatar-placeholder"></span>`}
             <strong>${escapeHtml(member.login)}</strong>
             <span>${row.label}</span>
           </div>

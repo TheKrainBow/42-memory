@@ -60,7 +60,7 @@ function guessRowHtml(guess) {
   return `
     <div class="guess-item">
       <span class="guess-word">
-        ${guess.user_image ? `<img class="avatar avatar-sm" src="${escapeHtml(guess.user_image)}" alt="" />` : ""}
+        ${guess.user_image ? `<img class="avatar avatar-sm" src="/api/avatar/${escapeHtml(guess.user_login)}" alt="" />` : ""}
         <span class="guess-word-main">
           <strong>${escapeHtml(guess.raw_word)}</strong>
           ${guess.user_login ? `<span class="guess-login">${escapeHtml(guess.user_login)}</span>` : ""}
@@ -130,7 +130,7 @@ function renderBombResults(game, members) {
       return `
         <div class="leaderboard-row">
           <span class="leaderboard-rank">#${index + 1}</span>
-          ${member.imageUrl ? `<img class="avatar" src="${escapeHtml(member.imageUrl)}" alt="" />` : ""}
+          ${member.imageUrl ? `<img class="avatar" src="/api/avatar/${escapeHtml(member.login)}" alt="" />` : ""}
           <strong class="leaderboard-login">${escapeHtml(member.login)}</strong>
           <span class="leaderboard-stats">${row.label}</span>
         </div>
@@ -169,7 +169,7 @@ function renderResults(game) {
     .map((player, index) => `
       <div class="leaderboard-row">
         <span class="leaderboard-rank">#${index + 1}</span>
-        ${player.image_url ? `<img class="avatar" src="${escapeHtml(player.image_url)}" alt="" />` : ""}
+        ${player.image_url ? `<img class="avatar" src="/api/avatar/${escapeHtml(player.login)}" alt="" />` : ""}
         <strong class="leaderboard-login">${escapeHtml(player.login)}</strong>
         <span class="leaderboard-stats">${player.found_count} trouvés · ${player.mistake_count} erreurs</span>
       </div>

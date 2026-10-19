@@ -185,7 +185,7 @@ export function renderMembers(el, members) {
   el.innerHTML = members
     .map((member) => `
       <div class="member-row ${member.coalition === "HORDE" ? "member-horde" : "member-alliance"}">
-        ${member.imageUrl ? `<img class="avatar" src="${escapeHtml(member.imageUrl)}" alt="" />` : `<span class="avatar avatar-placeholder"></span>`}
+        ${member.imageUrl ? `<img class="avatar" src="/api/avatar/${escapeHtml(member.login)}" alt="" />` : `<span class="avatar avatar-placeholder"></span>`}
         <strong class="member-login">${escapeHtml(member.login)}</strong>
         ${member.isHost ? `<span class="badge badge-host">Hôte</span>` : ""}
         <img class="member-emblem" src="${coalitionEmblem(member.coalition)}" alt="${coalitionName(member.coalition)}" />

@@ -22,7 +22,7 @@ function continueToApp() {
 
 function showCoalitionStep(user) {
   loginProfile.innerHTML = `
-    ${user.imageUrl ? `<img class="avatar avatar-lg" src="${escapeHtml(user.imageUrl)}" alt="" />` : ""}
+    ${user.imageUrl ? `<img class="avatar avatar-lg" src="/api/avatar/${escapeHtml(user.login)}" alt="" />` : ""}
     <strong>${escapeHtml(user.login)}</strong>
   `;
   loginStep.hidden = true;

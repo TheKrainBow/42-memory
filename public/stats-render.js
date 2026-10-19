@@ -17,7 +17,7 @@ function leaderboardRow(player, index, metric) {
   return `
     <div class="leaderboard-row">
       <span class="leaderboard-rank">#${index + 1}</span>
-      ${player.image_url ? `<img class="avatar" src="${escapeHtml(player.image_url)}" alt="" />` : ""}
+      ${player.image_url ? `<img class="avatar" src="/api/avatar/${escapeHtml(player.login)}" alt="" />` : ""}
       <strong class="leaderboard-login">${escapeHtml(player.login)}</strong>
       <span class="leaderboard-stats">${metric}</span>
     </div>

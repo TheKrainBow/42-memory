@@ -100,6 +100,37 @@ async function fetchIntra(path, accessToken) {
   return response.json();
 }
 
+// Intra's CDN rejects a per-user delegated token for avatar image bytes and
+// requires one scoped to just "public" instead, so this is cached separately
+// from any user's session token. It never leaves the backend: every <img>
+// goes through /api/avatar/:login, which uses this to fetch the bytes itself.
+let imageTokenCache = null;
+let imageTokenCacheTime = 0;
+const IMAGE_TOKEN_TTL = 55 * 60 * 1000; // 55 minutes
+
+export async function getImageToken() {
+  if (imageTokenCache && Date.now() - imageTokenCacheTime < IMAGE_TOKEN_TTL) {
+    return imageTokenCache;
+  }
+  const response = await fetch(FT_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: FT_CLIENT_ID,
+      client_secret: FT_CLIENT_SECRET,
+      scope: "public",
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Image token request failed (${response.status})`);
+  }
+  const data = await response.json();
+  imageTokenCache = data.access_token;
+  imageTokenCacheTime = Date.now();
+  return imageTokenCache;
+}
+
 // A user can belong to up to two coalitions (Horde/Alliance and
 // Harkonnen/Corrino/Atreides); only Horde/Alliance matters for the games.
 function pickCoalition(coalitions) {

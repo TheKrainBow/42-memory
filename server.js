@@ -11,6 +11,7 @@ import {
   destroySession,
   exchangeCode,
   fetchIntraProfile,
+  getImageToken,
   getSessionUser,
   parseCookies,
   publicUser,
@@ -821,7 +822,7 @@ function renderLoginProfile(user) {
     return "";
   }
   return `
-    ${user.image_url ? `<img class="avatar avatar-lg" src="${escapeHtml(user.image_url)}" alt="" />` : ""}
+    ${user.image_url ? `<img class="avatar avatar-lg" src="/api/avatar/${escapeHtml(user.login)}" alt="" />` : ""}
     <strong>${escapeHtml(user.login)}</strong>
   `;
 }
@@ -924,6 +925,37 @@ app.post("/auth/logout", (req, res) => {
 
 app.get("/api/me", (req, res) => {
   res.json({ user: publicUser(getSessionUser(req)) });
+});
+
+// Streams a user's 42 avatar bytes server-side instead of letting the
+// browser hotlink intra's CDN directly, since that now requires a bearer
+// token the browser can't provide — and this way the token stays backend-only.
+app.get("/api/avatar/:login", async (req, res) => {
+  if (!getSessionUser(req)) {
+    return res.status(401).end();
+  }
+  const login = String(req.params.login || "").trim();
+  if (!login) {
+    return res.status(400).end();
+  }
+  const row = db.prepare(`SELECT image_url FROM users WHERE login = ?`).get(login);
+  if (!row?.image_url) {
+    return res.status(404).end();
+  }
+  try {
+    const token = await getImageToken();
+    const upstream = await fetch(row.image_url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!upstream.ok) {
+      return res.status(404).end();
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.set("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+    res.set("Cache-Control", "private, max-age=3600");
+    res.send(buf);
+  } catch (err) {
+    console.error("Avatar proxy error:", err.message);
+    res.status(404).end();
+  }
 });
 
 app.post("/api/me/coalition", (req, res) => {
@@ -1290,7 +1322,7 @@ function renderUserChip(user) {
   const theme = themeFor(user);
   return `
     <div class="user-chip">
-      ${user.image_url ? `<img class="avatar" src="${escapeHtml(user.image_url)}" alt="" />` : ""}
+      ${user.image_url ? `<img class="avatar" src="/api/avatar/${escapeHtml(user.login)}" alt="" />` : ""}
       <div class="user-chip-main">
         <strong>${escapeHtml(user.login)}</strong>
         <span>${theme.factionName}</span>
